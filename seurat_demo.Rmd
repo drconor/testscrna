@@ -1,0 +1,215 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Seurat - Guided Clustering Tutorial
+
+#### The original version of this guilded clustering tutorial is available on the Satija Lab website for Seurat.
+
+```{r Load-packages}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(Matrix)
+library(limma)
+library(presto)
+```
+
+```{r Load-data-and-initialize-Seurat-object}
+# Load the dataset
+innateTcell.data <- read.table("../data/counts/GSE124731_single_cell_rnaseq_gene_counts.txt.gz", header=T, row.names = 1)
+
+# Convert to dgCMatrix format
+innateTcell.data <- as.matrix(innateTcell.data)
+innateTcell.data <- Matrix(innateTcell.data)
+
+metadata <- read.table("../data/counts/GSE124731_single_cell_rnaseq_meta_data.txt.gz", header=T, row.names = 1)
+
+# Initialize the Seurat object with the raw (non-normalized data).
+innateTcell <- CreateSeuratObject(counts = innateTcell.data, project = "innate T cells", min.cells = 3, min.features = 200, meta.data = metadata)
+innateTcell
+
+# Save an intermediate file (the Seurat object) 
+saveRDS(innateTcell, file = "../results/seurat_object.rds")
+```
+
+#### What does data in a count matrix look like?
+
+```{r Preview-count-matrix}
+# Lets examine a few genes in the first thirty cells
+innateTcell.data[1:5, 1:5]
+
+# The . values in the matrix represent 0s (no molecules detected). 
+```
+
+# QC and selecting cells for further analysis
+
+The number of unique genes and total molecules are automatically calculated during CreateSeuratObject(). You can find them stored in the object meta data.
+
+```{r Preview-metadata}
+# Show QC metrics for the first 10 cells
+head(innateTcell@meta.data, 10)
+```
+
+
+```{r QC-violin-plot}
+# Visualize QC metrics as a violin plot
+VlnPlot(innateTcell, features = c("nFeature_RNA", "nCount_RNA", "percent_mito"), ncol = 3)
+```
+
+```{r Total-reads-vs-mito-Total-reads-vs-genes}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(innateTcell, feature1 = "nCount_RNA", feature2 = "percent_mito")
+plot2 <- FeatureScatter(innateTcell, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r Filter-cells}
+# Filter cells that have unique feature counts over 2,000 or less than 200, and cells that have >5% mitochondrial counts.
+
+innateTcell <- subset(innateTcell, subset = nFeature_RNA > 200 & nFeature_RNA < 2000 & percent_mito < 5)
+```
+
+# Normalize the data 
+After removing unwanted cells from the dataset, we can normalize the data. By default, Seurat employs a global-scaling normalization method "LogNormalize" that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. Normalized values are stored in innateTcell[["RNA"]]@data.
+
+```{r Normalize-data}
+innateTcell <- NormalizeData(innateTcell, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# Identification of highly variable features (feature selection)
+
+Calculate a subset of features that exhibit high cell-to-cell variation in the dataset (i.e, they are highly expressed in some cells, and lowly expressed in others). Focusing on these genes in downstream analysis helps to highlight biological signal in single-cell datasets.
+
+Seurat v3 improves on previous versions by directly modeling the mean-variance relationship inherent in single-cell data, and is implemented in the FindVariableFeatures() function. By default, Seurat returns 2,000 features per dataset that can be used in downstream analysis, like PCA.
+
+```{r Feature-selection}
+innateTcell <- FindVariableFeatures(innateTcell, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(innateTcell), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(innateTcell)
+plot1
+plot2 <- LabelPoints(plot = plot1, points = top10, xnudge=0, ynudge=0, repel = TRUE) #When using repel, set xnudge and ynudge to 0 for optimal results
+plot2
+```
+
+# Scaling the data
+
+Next, apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA. The ScaleData() function:
+
+-   Shifts the expression of each gene, so that the mean expression across cells is 0
+-   Scales the expression of each gene, so that the variance across cells is 1
+    -   This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+-   The results of this are stored in innateTcell[["RNA"]]@scale.data
+
+```{r Scale-data}
+all.genes <- rownames(innateTcell)
+innateTcell <- ScaleData(innateTcell, features = all.genes)
+```
+
+# Perform linear dimensional reduction
+
+Next we perform PCA on the scaled data. By default, only the previously determined variable features are used as input, but can be defined using features argument if you wish to choose a different subset.
+
+```{r Run-PCA}
+innateTcell <- RunPCA(innateTcell, features = VariableFeatures(object = innateTcell))
+```
+
+```{r List-genes-by-PC}
+# Examine and visualize PCA results a few different ways
+print(innateTcell[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r Plot-PC-loadings}
+VizDimLoadings(innateTcell, dims = 1:2, reduction = "pca")
+```
+
+```{r Plot-PCA}
+DimPlot(innateTcell, reduction = "pca")
+```
+
+# Determine the 'dimensionality' of the dataset
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a 'metafeature' that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. However, how many components should we choose to include?
+
+An 'Elbow plot' is a heuristic ranking of principle components based on the percentage of variance explained by each one (ElbowPlot() function). In this example, we can observe an 'elbow' around PC5-7, suggesting that the majority of true signal is captured in the first 7 PCs.
+
+```{r Elbow-Plot}
+ElbowPlot(innateTcell)
+```
+
+# Cluster the cells
+
+Seurat v3 applies a graph-based clustering approach. First, a KNN graph is constructed based on the euclidean distance in PCA space, and edge weights between any two cells are refined based on the shared overlap in their local neighborhoods (Jaccard similarity). This step is performed using the FindNeighbors() function, and takes as input the previously defined dimensionality of the dataset (first 7 PCs).
+
+To cluster the cells, apply modularity optimization techniques to iteratively group cells together, with the goal of optimizing the standard modularity function. The FindClusters() function implements this procedure, and contains a resolution parameter that sets the 'granularity' of the downstream clustering, with increased values leading to a greater number of clusters. Setting this parameter between 0.4-1.2 typically returns good results for single-cell datasets of around 3K cells. Optimal resolution often increases for larger datasets. The clusters can be found using the Idents() function.
+
+```{r Cluster-cells}
+innateTcell <- FindNeighbors(innateTcell, dims = 1:10)
+innateTcell <- FindClusters(innateTcell, resolution = 0.5)
+```
+
+# Run non-linear dimensional reduction (UMAP/tSNE)
+
+Seurat offers several non-linear dimensional reduction techniques, such as tSNE and UMAP, to visualize and explore these datasets. The goal of these algorithms is to learn the underlying manifold of the data in order to place similar cells together in low-dimensional space. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots. As input to the UMAP and tSNE, we suggest using the same PCs as input to the clustering analysis.
+
+```{r Run-UMAP}
+# If you haven't installed UMAP, you can do so via reticulate::py_install(packages =
+# 'umap-learn')
+innateTcell <- RunUMAP(innateTcell, dims = 1:5)
+```
+
+```{r Plot-UMAP}
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+DimPlot(innateTcell, reduction = "umap")
+```
+
+You can save the object at this point so that it can easily be loaded back in without having to rerun the computationally intensive steps performed above, or easily shared with collaborators.
+
+```{r Save-intermediate}
+saveRDS(innateTcell, file = "../results/seurat_intermediate.rds")
+```
+
+# Finding differentially expressed features (cluster biomarkers)
+
+Seurat can help you find markers that define clusters via differential expression. By default, it identifies positive and negative markers of a single cluster (specified in ident.1), compared to all other cells. FindAllMarkers() automates this process for all clusters, but you can also test groups of clusters vs. each other, or against all cells.
+
+The min.pct argument requires a feature to be detected at a minimum percentage in either of the two groups of cells, and the thresh.test argument requires a feature to be differentially expressed (on average) by some amount between the two groups. 
+
+```{r Find-cluster-markers}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+innateTcell.markers <- FindAllMarkers(innateTcell, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+innateTcell.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 2, order_by = avg_log2FC)
+```
+
+
+```{r Plot-DE-genes}
+# Visualize 8 differentially expressed genes
+VlnPlot(innateTcell, features = c("ENSG00000113088","ENSG00000112419","ENSG00000100450","ENSG00000231389",
+"ENSG00000172005","ENSG00000204472","ENSG00000163453","ENSG00000158869"))
+```
+
+```{r Plot-raw-counts}
+# you can plot raw counts as well
+VlnPlot(innateTcell, features = c("ENSG00000113088","ENSG00000112419","ENSG00000100450","ENSG00000231389",
+"ENSG00000172005","ENSG00000204472","ENSG00000163453","ENSG00000158869"), layer = "counts", log = TRUE)
+```
+
+```{r Feature-Plot}
+FeaturePlot(innateTcell, features = c("ENSG00000113088","ENSG00000112419","ENSG00000100450","ENSG00000231389",
+"ENSG00000172005","ENSG00000204472","ENSG00000163453","ENSG00000158869"))
+```
+
+```{r Save-RDS}
+saveRDS(innateTcell, file = "../results/seurat_final.rds")
+```
