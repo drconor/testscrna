@@ -1,0 +1,62 @@
+{
+	"version": 1,
+	"base_image": "codeocean/py-r:python3.10.12-R4.2.3-IRkernel-ubuntu22.04",
+	"post_install": true,
+	"options": {
+		"registry_host_arg": true,
+		"git_ask_pass": true,
+		"mount_secrets": true
+	},
+	"installers": {
+		"mamba": {
+			"packages": [
+				{
+					"name": "r-irkernel",
+					"version": "1.3.2"
+				},
+				{
+					"name": "r-presto",
+					"version": "1.0.0"
+				},
+				{
+					"name": "r-rcpp",
+					"version": "1.0.11"
+				},
+				{
+					"name": "r-seurat",
+					"version": "5.1.0"
+				}
+			],
+			"channels": [
+				"bioconda"
+			]
+		},
+		"rbioconductor": {
+			"packages": [
+				{
+					"name": "BiocVersion",
+					"version": "3.16.0"
+				},
+				{
+					"name": "limma",
+					"version": "3.54.2"
+				}
+			],
+			"r_version": "4.2.3",
+			"install_bioconductor": true
+		},
+		"rcran": {
+			"packages": [
+				{
+					"name": "BiocManager",
+					"version": "1.30.26"
+				},
+				{
+					"name": "markdown",
+					"version": "2.0"
+				}
+			],
+			"use_rcache": true
+		}
+	}
+}
